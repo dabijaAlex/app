@@ -1,0 +1,16 @@
+program        : lsm (serial Longstaff-Schwartz baseline)
+command        : lsm --preset bench --input data/options_realistic.csv --out out/realistic --dump-paths
+date (UTC)     : 2026-11-16 00:41:53
+hostname       : ALEX
+compiler       : GCC 16.1.0
+C++ standard   : 202302
+path_t         : float
+preset         : bench
+input_csv      : data/options_realistic.csv
+num_paths      : 100000
+steps_per_year : 50
+basis_degree   : 2
+seed           : 42
+binomial_steps : 2000
+repeat         : 1
+convergence    : false
