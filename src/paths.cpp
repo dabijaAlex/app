@@ -1,5 +1,4 @@
 // paths.cpp - Monte Carlo path generation (geometric Brownian motion).
-// Implements section 5.1 of LSM_SERIAL_BUILD_INSTRUCTIONS.md.
 // Parallelism: the outer loop over paths is an embarrassingly parallel map,
 // made possible by the counter-based Philox RNG (rng.hpp): path p needs no
 // state from any other path, so any worker can generate any range of paths.
@@ -11,11 +10,6 @@
 #include "lsm/rng.hpp"
 
 namespace lsm {
-
-void generate_paths(const OptionSpec& opt, const Config& cfg, std::size_t option_index,
-                    PathMatrix& out) {
-    generate_paths(opt, num_steps_for(opt, cfg), cfg.num_paths, cfg.seed, option_index, out);
-}
 
 // GBM, exact discretization (risk-neutral):
 //   S[t+1] = S[t] * exp( (r - 0.5*sigma^2)*dt + sigma*sqrt(dt)*Z )

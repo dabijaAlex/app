@@ -1,5 +1,4 @@
 // types.hpp - core numeric aliases and the PathMatrix container.
-// Implements section 3 of LSM_SERIAL_BUILD_INSTRUCTIONS.md.
 // Parallelism: PathMatrix is TIME-MAJOR so that every backward-induction step
 // reads one contiguous row (all paths at one time t). That row is what an
 // OpenMP thread team / MPI rank slice / CUDA grid will sweep in parallel.

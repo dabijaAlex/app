@@ -1,5 +1,4 @@
 // regression.hpp - least-squares fit Y ~ a + bX + cX^2 via the normal equations.
-// Implements section 5.2 of LSM_SERIAL_BUILD_INSTRUCTIONS.md.
 // Parallelism: RegressionSums is a mergeable value (operator+=). Merging
 // per-thread / per-rank / per-block partial sums IS the parallel reduction.
 // solve_normal_equations is tiny (3x3) and stays serial everywhere.

@@ -1,188 +1,121 @@
-// main.cpp - driver: parse CLI, read options, price each option, write output.
-// Implements the overall pipeline of section 1 and the run modes of
-// section 10 (--convergence, --repeat) of LSM_SERIAL_BUILD_INSTRUCTIONS.md.
-// Parallelism: the loop over options is an alternative parallel strategy
-// (independent tasks); inside each option the LSM kernels are parallelised.
+// main.cpp - price ONE American option with Longstaff-Schwartz and write three
+// small CSVs for scripts/plot.py.
+//
+//   lsm put|call S0 K r sigma T [paths] [steps_per_year] [seed]
+//
+// Outputs (in out/):
+//   summary.csv   one row: the option, the LSM price and its standard error
+//   boundary.csv  step,time,boundary,exercised,itm   (one row per step 1..M)
+//   paths.csv     time,p0..p49                       (first 50 simulated paths)
 
-#include <algorithm>
+#include <charconv>
 #include <chrono>
-#include <cstdlib>
+#include <cmath>
+#include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <print>
-#include <string>
 #include <string_view>
-#include <vector>
 
-#include "lsm/config.hpp"
 #include "lsm/lsm.hpp"
+#include "lsm/option.hpp"
 #include "lsm/paths.hpp"
-#include "lsm/reference.hpp"
-#include "lsm/report.hpp"
 #include "lsm/timer.hpp"
 #include "lsm/types.hpp"
-
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#endif
 
 using namespace lsm;
 
 namespace {
 
-// Median of a small vector (copy, then nth_element).
-double median(std::vector<double> v) {
-    std::sort(v.begin(), v.end());
-    const std::size_t n = v.size();
-    return (n % 2) ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
-}
+constexpr int kDegree = 2;                 // regression basis: 1, X, X^2
+constexpr std::size_t kSamplePaths = 50;   // paths written to paths.csv
+constexpr const char* kOutDir = "out";
 
-// Price one option end to end: paths -> LSM -> references. Phase times are
-// added to `timer`. `S` is a reusable buffer (allocated once for the run).
-OptionResult price_option(const OptionSpec& opt, const Config& cfg, std::size_t option_index,
-                          PathMatrix& S, PhaseTimer& timer) {
-    OptionResult r;
-    r.spec = opt;
-    r.paths = cfg.num_paths;
-    r.steps = num_steps_for(opt, cfg);
-    const double dt = opt.T / static_cast<double>(r.steps);
-
-    {
-        auto _ = timer.scope(Phase::Generate);
-        generate_paths(opt, cfg, option_index, S);
-    }
-    r.lsm = price_lsm(S, opt, cfg.basis_degree, dt, &timer);
-    {
-        auto _ = timer.scope(Phase::Reference);
-        r.binomial = binomial_american(opt, cfg.binomial_steps);
-    }
-    return r;
-}
-
-// Section 10: LSM on the first option for an increasing number of paths.
-std::vector<ConvergenceRow> run_convergence(const OptionSpec& opt, const Config& cfg, PathMatrix& S) {
-    static constexpr std::size_t kPaths[] = {1'000, 2'000, 5'000, 10'000, 20'000,
-                                            50'000, 100'000, 200'000, 500'000};
-    const double bin = binomial_american(opt, cfg.binomial_steps);
-    const std::size_t M = num_steps_for(opt, cfg);
-    const double dt = opt.T / static_cast<double>(M);
-    std::vector<ConvergenceRow> rows;
-    if (!cfg.quiet) std::println("\nConvergence study on {} (binomial {:.4f})", opt.name, bin);
-    for (std::size_t n : kPaths) {
-        const auto t0 = std::chrono::steady_clock::now();
-        generate_paths(opt, M, n, cfg.seed, 0, S);
-        const auto res = price_lsm(S, opt, cfg.basis_degree, dt);
-        const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-        rows.push_back({n, res.estimate.price, res.estimate.std_error,
-                        std::abs(res.estimate.price - bin), secs});
-        if (!cfg.quiet)
-            std::println("  paths={:>7}  price={:.4f} ±{:.4f}  |err|={:.4f}  {:.3f} s", n,
-                         res.estimate.price, res.estimate.std_error, rows.back().abs_error, secs);
-    }
-    return rows;
+// Strict number parse: the whole string must be consumed.
+template <class T>
+bool parse(std::string_view s, T& v) {
+    const auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
+    return ec == std::errc{} && ptr == s.data() + s.size();
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-#ifdef _WIN32
-    SetConsoleOutputCP(CP_UTF8);  // box-drawing characters and σ in the table
-#endif
-    std::vector<std::string_view> args(argv + 1, argv + argc);
-    auto cfg_or = parse_cli(args);
-    if (!cfg_or) {
-        const bool help = std::ranges::find(args, "--help") != args.end() ||
-                          std::ranges::find(args, "-h") != args.end();
-        std::println(help ? stdout : stderr, "{}", cfg_or.error());
-        return help ? 0 : 2;
-    }
-    const Config cfg = *cfg_or;
+    const auto run_start = std::chrono::steady_clock::now();
+    // ---- input: one option from the command line ---------------------------
+    OptionSpec opt;
+    std::size_t N = 100'000, steps_per_year = 50;
+    std::uint64_t seed = 42;
 
-    auto opts_or = read_options_csv(cfg.input_csv);
-    if (!opts_or) {
-        std::println(stderr, "error: {}", opts_or.error());
+    const std::string_view type = argc > 1 ? argv[1] : "";
+    bool ok = (argc >= 7 && argc <= 10) && (type == "put" || type == "call") &&
+              parse(argv[2], opt.S0) && parse(argv[3], opt.K) && parse(argv[4], opt.r) &&
+              parse(argv[5], opt.sigma) && parse(argv[6], opt.T) &&
+              (argc < 8 || parse(argv[7], N)) && (argc < 9 || parse(argv[8], steps_per_year)) &&
+              (argc < 10 || parse(argv[9], seed));
+    ok = ok && opt.S0 > 0 && opt.K > 0 && opt.sigma > 0 && opt.T > 0 && N > 0 && steps_per_year > 0;
+    if (!ok) {
+        std::println(stderr, "usage: lsm put|call S0 K r sigma T [paths=100000] [steps_per_year=50] [seed=42]\n"
+                             "example: lsm put 36 40 0.06 0.2 1");
         return 2;
     }
-    const auto& options = *opts_or;
+    opt.type = (type == "put") ? OptionType::Put : OptionType::Call;
 
-    // Memory estimate: one PathMatrix, sized for the largest option, reused.
-    std::size_t maxM = 0;
-    for (const auto& o : options) maxM = std::max(maxM, num_steps_for(o, cfg));
-    const std::size_t maxN = cfg.convergence ? std::max<std::size_t>(cfg.num_paths, 500'000) : cfg.num_paths;
-    const double bytes = path_memory_bytes(maxM, maxN);
-    double max_gb = 8.0;
-    if (const char* e = std::getenv("LSM_MAX_GB")) max_gb = std::atof(e);
-    if (bytes > max_gb * 1e9) {
-        std::println(stderr,
-                     "error: path matrix needs {:.2f} GB ((M+1)*N*sizeof(path_t) = {}*{}*{}), "
-                     "above the LSM_MAX_GB limit of {:.2f} GB. Reduce --paths / --steps-per-year "
-                     "or raise LSM_MAX_GB.",
-                     bytes / 1e9, maxM + 1, maxN, sizeof(path_t), max_gb);
-        return 3;
+    // ---- the algorithm --------------------------------------------------------
+    const std::size_t M = num_steps(opt.T, steps_per_year);
+    const double dt = opt.T / static_cast<double>(M);
+
+    PhaseTimer timer;
+    PathMatrix S;
+    {
+        auto _ = timer.scope(Phase::Generate);
+        generate_paths(opt, M, N, seed, /*option_index=*/0, S);
     }
-    if (!cfg.quiet) {
-        print_header(cfg, bytes);
-        if (bytes > 1e9) std::println("warning: allocating {:.2f} GB for paths\n", bytes / 1e9);
-    }
+    const LsmResult res = price_lsm(S, opt, kDegree, dt, &timer);
 
-    std::error_code ec;
-    std::filesystem::create_directories(cfg.output_dir, ec);
-    if (ec) {
-        std::println(stderr, "error: cannot create output dir '{}': {}", cfg.output_dir, ec.message());
-        return 2;
-    }
+    // ---- output ---------------------------------------------------------------
+    const double price = res.estimate.price, se = res.estimate.std_error;
 
-    PathMatrix S;  // allocated once (on first use), reused for every option
-    std::vector<OptionResult> results(options.size());
-    // timings[i][rep] = phase times of option i in repetition rep
-    std::vector<std::vector<PhaseTimer>> timings(options.size());
+    std::println("{} S0={} K={} r={} sigma={} T={}   paths={} steps={} seed={}", type, opt.S0, opt.K,
+                 opt.r, opt.sigma, opt.T, N, M, seed);
+    std::println("LSM       {:.4f} ± {:.4f}{}", price, se, res.exercise_at_t0 ? "  (exercise now)" : "");
 
-    if (!cfg.quiet) print_table_header();
-    for (std::size_t rep = 0; rep < cfg.repeat; ++rep) {
-        // [PARALLEL: independent tasks] loop over options - alternative strategy:
-        // OpenMP parallel for over options; MPI: split options across ranks;
-        // CUDA: one stream per option. Hazard: memory - one PathMatrix per
-        // concurrent option (up to ~3 GB each in the heavy preset).
-        for (std::size_t i = 0; i < options.size(); ++i) {
-            PhaseTimer t;
-            results[i] = price_option(options[i], cfg, i, S, t);
-            timings[i].push_back(t);
-            if (rep + 1 == cfg.repeat) {
-                if (!cfg.quiet) print_row(results[i]);
-                if (cfg.dump_paths && i == 0)
-                    write_sample_paths_csv(cfg.output_dir, S, options[i].T / static_cast<double>(results[i].steps));
-                if (cfg.dump_boundary) write_boundary_csv(cfg.output_dir, results[i]);
-            }
-        }
+    std::filesystem::create_directories(kOutDir);
+    const std::string dir = kOutDir;
+
+    std::ofstream sum(dir + "/summary.csv");
+    std::println(sum, "type,S0,K,r,sigma,T,paths,steps,seed,lsm,se");
+    std::println(sum, "{},{},{},{},{},{},{},{},{},{:.6f},{:.6f}", type, opt.S0, opt.K, opt.r,
+                 opt.sigma, opt.T, N, M, seed, price, se);
+
+    // boundary = put: highest S that exercised at t; call: lowest. nan if none.
+    // The last row (t = M) is expiry: every in-the-money path "exercises".
+    std::ofstream bnd(dir + "/boundary.csv");
+    std::println(bnd, "step,time,boundary,exercised,itm");
+    for (std::size_t t = 1; t <= M; ++t)
+        std::println(bnd, "{},{:.6f},{:.6f},{},{}", t, dt * static_cast<double>(t), res.boundary[t],
+                     res.exercised_count[t], res.itm_count[t]);
+
+    std::ofstream pth(dir + "/paths.csv");
+    const std::size_t np = std::min(kSamplePaths, N);
+    std::print(pth, "time");
+    for (std::size_t p = 0; p < np; ++p) std::print(pth, ",p{}", p);
+    std::println(pth, "");
+    for (std::size_t t = 0; t <= M; ++t) {
+        std::print(pth, "{:.6f}", dt * static_cast<double>(t));
+        for (std::size_t p = 0; p < np; ++p) std::print(pth, ",{:.4f}", S.at(t, p));
+        std::println(pth, "");
     }
 
-    // Median / min per phase over repeats.
-    PhaseTimer total;
-    for (std::size_t i = 0; i < options.size(); ++i) {
-        for (std::size_t ph = 0; ph < kPhaseNames.size(); ++ph) {
-            std::vector<double> v;
-            for (const auto& t : timings[i]) v.push_back(t.values()[ph]);
-            results[i].timing.values()[ph] = median(v);
-            results[i].timing_min.values()[ph] = *std::ranges::min_element(v);
-        }
-        total += results[i].timing;
-    }
+    std::println("wrote {}/summary.csv boundary.csv paths.csv", kOutDir);
 
-    if (!cfg.quiet) print_summary(results, total);
-
-    std::string cmdline = "lsm";
-    for (auto a : args) cmdline += " " + std::string(a);
-    bool ok_files = write_results_csv(cfg.output_dir, results);
-    ok_files &= write_timings_csv(cfg.output_dir, results, cfg.repeat);
-    ok_files &= write_run_info(cfg.output_dir, cfg, cmdline);
-
-    if (cfg.convergence) ok_files &= write_convergence_csv(cfg.output_dir, run_convergence(options[0], cfg, S));
-
-    if (!cfg.quiet) std::println("\nOutput written to {}/", cfg.output_dir);
-    if (!ok_files) return 4;
-    const bool all_ok = std::ranges::all_of(results, [](const OptionResult& r) { return r.ok(); });
-    return all_ok ? 0 : 1;
+    // total = the whole run: parsing, allocation, every phase, writing the CSVs.
+    // "other" is the part of it outside the timed phases.
+    const double total = std::chrono::duration<double>(std::chrono::steady_clock::now() - run_start).count();
+    std::print("time     ");
+    for (std::size_t i = 0; i < kPhaseNames.size(); ++i)
+        std::print(" {} {:.3f}s", kPhaseNames[i], timer.values()[i]);
+    std::println("");
+    std::println("total     {:.3f}s  (phases {:.3f}s + other {:.3f}s)", total, timer.total(), total - timer.total());
+    return 0;
 }

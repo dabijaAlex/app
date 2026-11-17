@@ -1,5 +1,4 @@
 // regression.cpp - solve the least-squares normal equations (2x2 or 3x3).
-// Implements section 5.2 of LSM_SERIAL_BUILD_INSTRUCTIONS.md.
 // Parallelism: this solve is O(1) work per time step and stays serial in all
 // versions; only the sums feeding it (lsm.cpp: accumulate_sums) are reduced
 // in parallel.

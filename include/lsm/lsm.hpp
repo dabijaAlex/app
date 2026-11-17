@@ -1,5 +1,4 @@
 // lsm.hpp - Longstaff-Schwartz backward induction and pricing.
-// Implements section 5.3 of LSM_SERIAL_BUILD_INSTRUCTIONS.md.
 // Parallelism: each backward step = map+reduce (accumulate_sums), a tiny
 // serial solve, then a map (apply_exercise). The time loop itself is
 // SEQUENTIAL (step t needs the decisions of step t+1).
@@ -10,7 +9,7 @@
 #include <span>
 #include <vector>
 
-#include "lsm/config.hpp"
+#include "lsm/option.hpp"
 #include "lsm/regression.hpp"
 #include "lsm/timer.hpp"
 #include "lsm/types.hpp"
@@ -80,7 +79,7 @@ LsmResult price_lsm(const PathMatrix& S, const OptionSpec& opt, int degree, doub
                     PhaseTimer* timer = nullptr);
 
 // Same, with a custom per-step discount factor (needed by the hand-worked
-// toy example, section 8.1). dt is unused by the math; kept for symmetry.
+// toy example in tests/test_main.cpp). dt is unused by the math; kept for symmetry.
 LsmResult price_lsm_with_discount(const PathMatrix& S, const OptionSpec& opt, int degree,
                                   double dt, double step_discount, PhaseTimer* timer = nullptr);
 

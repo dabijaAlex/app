@@ -1,5 +1,4 @@
 // timer.hpp - per-phase wall-clock accumulation.
-// Implements section 5.5 of LSM_SERIAL_BUILD_INSTRUCTIONS.md.
 // These phases are exactly the ones whose speedup the team will plot after
 // parallelising, so keep them separate (even `solve`, which is tiny).
 #pragma once
@@ -17,13 +16,11 @@ enum class Phase : std::size_t {
     Solve,
     ApplyExercise,
     FinalPrice,
-    Reference,
     Count
 };
 
 inline constexpr std::array<std::string_view, static_cast<std::size_t>(Phase::Count)>
-    kPhaseNames = {"generate", "accumulate_sums", "solve", "apply_exercise", "final_price",
-                   "reference"};
+    kPhaseNames = {"generate", "accumulate_sums", "solve", "apply_exercise", "final_price"};
 
 // Accumulates seconds per phase. Usage:
 //   { auto s = timer.scope(Phase::Generate); generate_paths(...); }

@@ -1,5 +1,4 @@
 // rng.hpp - Philox4x32-10 counter-based random number generator + normals.
-// Implements section 4 of LSM_SERIAL_BUILD_INSTRUCTIONS.md.
 // A random number is a PURE FUNCTION of (seed, counter). There is no hidden
 // state, so any thread / MPI rank / CUDA thread can generate any path on its
 // own, and the serial, OpenMP, MPI and CUDA versions produce BIT-IDENTICAL

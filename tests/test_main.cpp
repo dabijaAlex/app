@@ -1,5 +1,4 @@
 // test_main.cpp - unit tests, plain asserts with readable output, no framework.
-// Implements section 8 of LSM_SERIAL_BUILD_INSTRUCTIONS.md.
 // Parallelism: test 4 (chunked RegressionSums merge) simulates the future
 // parallel reduction; test 3 (determinism) is the property the parallel
 // versions will be checked against.
@@ -13,10 +12,9 @@
 #include <string>
 #include <vector>
 
-#include "lsm/config.hpp"
 #include "lsm/lsm.hpp"
+#include "lsm/option.hpp"
 #include "lsm/paths.hpp"
-#include "lsm/reference.hpp"
 #include "lsm/regression.hpp"
 #include "lsm/rng.hpp"
 #include "lsm/types.hpp"
@@ -44,7 +42,7 @@ void check_near(double got, double expected, double tol, const std::string& name
                       std::abs(got - expected), tol));
 }
 
-OptionSpec ls_s36() { return {"LS_S36_v20_T1", OptionType::Put, 36, 40, 0.06, 0.20, 1.0}; }
+OptionSpec ls_s36() { return {OptionType::Put, 36, 40, 0.06, 0.20, 1.0}; }
 
 // ---------------------------------------------------------------------------
 // 8.1 Hand-worked toy example (Longstaff-Schwartz style), K=100, degree 1,
@@ -60,7 +58,7 @@ void test_toy_example() {
     S.resize(4, 5);
     for (std::size_t p = 0; p < 5; ++p)
         for (std::size_t t = 0; t < 4; ++t) S.at(t, p) = static_cast<path_t>(P[p][t]);
-    const OptionSpec opt{"toy", OptionType::Put, 100, 100, 0.0, 0.2, 3.0};
+    const OptionSpec opt{OptionType::Put, 100, 100, 0.0, 0.2, 3.0};
     const double K = opt.K;
     const auto disc = make_discount_table_step(0.9, 3);
 
@@ -131,12 +129,11 @@ void test_normals() {
 // 8.2.3 Determinism: same seed -> bit-identical prices.
 void test_determinism() {
     const auto opt = ls_s36();
-    Config cfg;
-    cfg.num_paths = 20'000;
+    const std::size_t M = num_steps(opt.T, 50), N = 20'000;
     auto run = [&] {
         PathMatrix S;
-        generate_paths(opt, cfg, 0, S);
-        return price_lsm(S, opt, 2, opt.T / static_cast<double>(num_steps_for(opt, cfg)));
+        generate_paths(opt, M, N, 42, 0, S);
+        return price_lsm(S, opt, 2, opt.T / static_cast<double>(M));
     };
     const auto r1 = run(), r2 = run();
     check(std::bit_cast<std::uint64_t>(r1.estimate.price) == std::bit_cast<std::uint64_t>(r2.estimate.price) &&
@@ -145,8 +142,8 @@ void test_determinism() {
 
     // A different option index must give different paths (RNG streams separate).
     PathMatrix A, B;
-    generate_paths(opt, cfg, 0, A);
-    generate_paths(opt, cfg, 1, B);
+    generate_paths(opt, M, N, 42, 0, A);
+    generate_paths(opt, M, N, 42, 1, B);
     check(A.at(10, 0) != B.at(10, 0), "different option_index -> different random stream");
 }
 
@@ -202,41 +199,28 @@ void test_regression_exact() {
     check(!solve_normal_equations(same, 2).valid, "all X equal (singular) -> invalid");
 }
 
-// 8.2.6 Binomial American put and call.
-void test_binomial() {
-    check_near(binomial_american(ls_s36(), 2000), 4.4867, 0.003, "binomial LS_S36_v20_T1 (2000 steps)");
-    const OptionSpec call{"call", OptionType::Call, 100, 100, 0.05, 0.20, 1.0};
-    check_near(binomial_american(call, 2000), 10.4506, 0.003,
-               "binomial American call (no dividends) = 10.4506");
-}
-
 // Extra: LSM on the paper's first row; plus deep-ITM t=0 rule.
 void test_lsm_and_t0() {
     const auto opt = ls_s36();
-    Config cfg;  // 100k paths, 50 steps/year
+    const std::size_t M = num_steps(opt.T, 50);  // 100k paths, 50 steps/year
     PathMatrix S;
-    generate_paths(opt, cfg, 0, S);
-    const auto r = price_lsm(S, opt, 2, opt.T / static_cast<double>(num_steps_for(opt, cfg)));
+    generate_paths(opt, M, 100'000, 42, 0, S);
+    const auto r = price_lsm(S, opt, 2, opt.T / static_cast<double>(M));
     check(r.estimate.price > 4.45 && r.estimate.price < 4.50, "LSM LS_S36_v20_T1 in [4.45, 4.50]",
           std::format("got {:.5f}", r.estimate.price));
 
-    const OptionSpec deep{"DeepITM_1y_put", OptionType::Put, 80, 100, 0.05, 0.20, 1.0};
-    cfg.num_paths = 20'000;
-    generate_paths(deep, cfg, 0, S);
-    const auto d = price_lsm(S, deep, 2, deep.T / static_cast<double>(num_steps_for(deep, cfg)));
+    const OptionSpec deep{OptionType::Put, 80, 100, 0.05, 0.20, 1.0};
+    const std::size_t Md = num_steps(deep.T, 50);
+    generate_paths(deep, Md, 20'000, 42, 0, S);
+    const auto d = price_lsm(S, deep, 2, deep.T / static_cast<double>(Md));
     check(d.exercise_at_t0 && d.estimate.price == 20.0, "deep ITM put: immediate exercise = 20.00",
           std::format("got {:.6f}", d.estimate.price));
 }
 
-// CLI and CSV smoke tests.
-void test_cli() {
-    const std::vector<std::string_view> a = {"--paths", "123", "--preset", "heavy"};
-    auto c = parse_cli(a);
-    check(c && c->num_paths == 123 && c->steps_per_year == 365, "CLI: explicit flag overrides preset");
-    const std::vector<std::string_view> bad = {"--degree", "3"};
-    check(!parse_cli(bad), "CLI: invalid --degree rejected");
-    const OptionSpec hull{"Hull", OptionType::Put, 50, 50, 0.1, 0.4, 0.416667};
-    check(num_steps_for(hull, Config{}) == 21, "M = round(50 * 5/12) = 21");
+// Number of steps: M = round(steps_per_year * T), at least 1.
+void test_num_steps() {
+    check(num_steps(0.416667, 50) == 21, "M = round(50 * 5/12) = 21");
+    check(num_steps(0.001, 50) == 1, "M is at least 1");
 }
 
 }  // namespace
@@ -248,9 +232,8 @@ int main() {
     test_determinism();
     test_regression_merge();
     test_regression_exact();
-    test_binomial();
     test_lsm_and_t0();
-    test_cli();
+    test_num_steps();
     std::println("\n{} passed, {} failed", g_passed, g_failed);
     return g_failed == 0 ? 0 : 1;
 }

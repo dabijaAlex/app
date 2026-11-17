@@ -1,5 +1,4 @@
 // lsm.cpp - Longstaff-Schwartz backward induction and final pricing.
-// Implements section 5.3 of LSM_SERIAL_BUILD_INSTRUCTIONS.md.
 // Parallelism: per time step, accumulate_sums is map+REDUCE (the hot spot),
 // solve is serial, apply_exercise is a conflict-free map. The time loop in
 // price_lsm_table is SEQUENTIAL and is the scaling bottleneck (M-1 syncs).
